@@ -1,124 +1,86 @@
 # -*- coding: UTF-8 -*-
-try:
-    import json
-    import os
-    from http.server import BaseHTTPRequestHandler
+import json
+import os
+import requests
+from http.server import BaseHTTPRequestHandler
 
-    # 延迟导入，方便定位问题
-    json_lib = json
-    os_lib = os
-    HandlerBase = BaseHTTPRequestHandler
-    init_ok = True
-except Exception as e:
-    init_ok = False
-    init_error = str(e)
+DEFAULT_USER = "resourceOvO"
 
 
-class handler(HandlerBase if init_ok else object):
-    def do_GET(self):
-        if not init_ok:
-            self.send_response(500)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(json_lib.dumps({"error": f"init failed: {init_error}"}).encode("utf-8"))
-            return
+def getdata(name):
+    """通过 GitHub GraphQL API 获取用户贡献日历数据"""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise Exception("GITHUB_TOKEN not set")
 
-        try:
-            # 解析用户名
-            path = self.path
-            user = path.split("?")[1] if "?" in path else ""
-
-            if not user:
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json_lib.dumps({"status": "ok", "message": "API is running"}).encode("utf-8"))
-                return
-
-            # 尝试导入 requests 并调用 GitHub API
-            import requests
-
-            token = os_lib.environ.get("GITHUB_TOKEN", "")
-            if not token:
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json_lib.dumps({"status": "ok", "message": "No GITHUB_TOKEN set", "user": user}).encode("utf-8"))
-                return
-
-            query = """
-            query($login: String!) {
-              user(login: $login) {
-                contributionsCollection {
-                  contributionCalendar {
-                    totalContributions
-                    weeks {
-                      contributionDays {
-                        date
-                        contributionCount
-                      }
-                    }
-                  }
-                }
+    query = """
+    query($login: String!) {
+      user(login: $login) {
+        contributionsCollection {
+          contributionCalendar {
+            totalContributions
+            weeks {
+              contributionDays {
+                date
+                contributionCount
               }
             }
-            """
+          }
+        }
+      }
+    }
+    """
 
-            resp = requests.post(
-                "https://api.github.com/graphql",
-                json={"query": query, "variables": {"login": user}},
-                headers={
-                    "Authorization": "Bearer " + token,
-                    "Content-Type": "application/json",
-                },
-                timeout=15,
-            )
+    resp = requests.post(
+        "https://api.github.com/graphql",
+        json={"query": query, "variables": {"login": name}},
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+        },
+        timeout=15,
+    )
 
-            if resp.status_code != 200:
-                self.send_response(500)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json_lib.dumps({
-                    "error": "GitHub API error",
-                    "status": resp.status_code,
-                    "body": resp.text[:500]
-                }).encode("utf-8"))
-                return
+    if resp.status_code != 200:
+        raise Exception(f"GitHub API returned {resp.status_code}: {resp.text[:300]}")
 
-            result = resp.json()
+    result = resp.json()
 
-            if "errors" in result:
-                self.send_response(500)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json_lib.dumps({"error": str(result["errors"])}).encode("utf-8"))
-                return
+    if "errors" in result:
+        raise Exception(str(result["errors"]))
 
-            calendar = result["data"]["user"]["contributionsCollection"]["contributionCalendar"]
-            total = calendar["totalContributions"]
-            weeks = calendar["weeks"]
+    calendar = result["data"]["user"]["contributionsCollection"]["contributionCalendar"]
+    total = calendar["totalContributions"]
+    weeks = calendar["weeks"]
 
-            # 展平 + 排序
-            all_days = []
-            for week in weeks:
-                for day in week["contributionDays"]:
-                    all_days.append({"date": day["date"], "count": day["contributionCount"]})
-            all_days.sort(key=lambda x: x["date"])
+    all_days = []
+    for week in weeks:
+        for day in week["contributionDays"]:
+            all_days.append({"date": day["date"], "count": day["contributionCount"]})
+    all_days.sort(key=lambda x: x["date"])
 
-            # 每 7 天一组
-            grouped = [all_days[i:i + 7] for i in range(0, len(all_days), 7)]
+    grouped = [all_days[i:i + 7] for i in range(0, len(all_days), 7)]
 
-            data = {"total": total, "contributions": grouped}
+    return {"total": total, "contributions": grouped}
+
+
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            path = self.path
+            user = path.split("?")[1] if "?" in path else DEFAULT_USER
+
+            data = getdata(user)
 
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json_lib.dumps(data).encode("utf-8"))
+            self.wfile.write(json.dumps(data).encode("utf-8"))
 
         except Exception as e:
             self.send_response(500)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json_lib.dumps({"error": str(e)}).encode("utf-8"))
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
